@@ -1,0 +1,38 @@
+# User-specific stuff
+.idea/
+.gigaide/
+
+
+# IDE-specific files
+*.iml
+*.ipr
+*.iws
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Logs and databases
+*.log
+*.sql
+*.sqlite
+
+
+# Python
+__pycache__
+*.pyc
+.pytest_cache
+
+# environment
+.venv/
+
+# secrets
+.env
+
+# ML models
+*.pt
+*.gguf
+
+# data folders
+_img/
+bin/

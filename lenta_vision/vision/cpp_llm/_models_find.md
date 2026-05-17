@@ -1,0 +1,1 @@
+https://huggingface.co/models?other=base_model:quantized:inclusionAI/ZwZ-8B
