@@ -1,15 +1,15 @@
-import os
-import cv2
-import time
-from pathlib import Path
-from typing import Optional, Tuple
-
-import numpy as np
-import torch
-from tqdm import tqdm
+from logging_setup import setup_logging
+from config import CFG
 from ultralytics import YOLO
+from tqdm import tqdm
+import torch
 import supervision as sv
-
+import numpy as np
+import cv2
+from typing import Optional, Tuple
+from pathlib import Path
+import time
+import os
 
 # =========================================================
 # OFFLINE / NO-NETWORK
@@ -20,30 +20,12 @@ os.environ["YOLO_CHECK_UPDATE"] = "0"
 os.environ["YOLO_OFFLINE"] = "1"
 
 
-# =========================================================
-# CONFIG
-# =========================================================
-MODEL_PATH = r"E:\Data Science\Хакатон_ценники\runs_yolo12_640\price_tags_yolo12s_img640_cleanv1-2\weights\best.pt"
-VIDEO_PATH = r"E:\Data Science\Хакатон_ценники\26_2-10.mp4"
-OUTPUT_DIR = r"E:\Data Science\Хакатон_ценники\inference_output_treker"
+logger = setup_logging("tracker")
 
-CONF_THRESH = 0.40
-IOU_THRESH = 0.45
-IMGSZ = 640
-SAVE_VIDEO = True
-SHOW_WINDOW = True
-SKIP_FRAMES = 0
-
-BOX_COLOR = (0, 60, 255)      # BGR
-TEXT_COLOR = (255, 255, 255)  # BGR
-BG_COLOR = (0, 60, 255)       # BGR
 
 WINDOW_NAME = "YOLO + ByteTrack"
 
 
-# =========================================================
-# HELPERS
-# =========================================================
 def format_time(seconds: float) -> str:
     seconds = max(0, int(seconds))
     return f"{seconds // 60:02d}:{seconds % 60:02d}"
@@ -127,18 +109,15 @@ def draw_hud(
                     (220, 220, 220), thick, cv2.LINE_AA)
 
 
-# =========================================================
-# TRACKER ITERATOR CLASS
-# =========================================================
 class YOLOTracker:
     def __init__(
         self,
-        model_path: str,
+        model_path,
         video_path,
-        conf: float = CONF_THRESH,
-        iou: float = IOU_THRESH,
-        imgsz: int = IMGSZ,
-        skip: int = SKIP_FRAMES,
+        conf: float = CFG.TRACK_CONF_THRESH,
+        iou: float = CFG.TRACK_IOU_THRESH,
+        imgsz: int = CFG.TRACK_IMGSZ,
+        skip: int = CFG.TRACK_SKIP_FRAMES,
         device: Optional[str] = None,
     ):
         self.conf = conf
@@ -148,11 +127,11 @@ class YOLOTracker:
 
         self.device = device or (
             "cuda" if torch.cuda.is_available() else "cpu")
-        print(f"[YOLOTracker] Device : {self.device}")
+        logger.info("[YOLOTracker] Device: %s", self.device)
 
         self.model = YOLO(str(model_path))
         self.model.to(self.device)
-        print(f"[YOLOTracker] Model  : {model_path}")
+        logger.info("[YOLOTracker] Model: %s", model_path)
 
         self.tracker = sv.ByteTrack()
 
@@ -169,9 +148,12 @@ class YOLOTracker:
         self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
         self.frame_idx = 0
 
-        print(
-            f"[YOLOTracker] {self.frame_width}x{self.frame_height} | "
-            f"{self.src_fps:.1f} FPS | {self.total_frames} frames total"
+        logger.info(
+            "[YOLOTracker] %sx%s | %.1f FPS | %s frames total",
+            self.frame_width,
+            self.frame_height,
+            self.src_fps,
+            self.total_frames,
         )
 
     def get_next_frame(self) -> Optional[Tuple[np.ndarray, sv.Detections]]:
@@ -197,19 +179,18 @@ class YOLOTracker:
 
             detections = sv.Detections.from_ultralytics(results)
             detections = self.tracker.update_with_detections(detections)
-
             return frame, detections
 
     def reset(self):
         self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
         self.frame_idx = 0
         self.tracker = sv.ByteTrack()
-        print("[YOLOTracker] Reset to frame 0.")
+        logger.info("[YOLOTracker] Reset to frame 0.")
 
     def release(self):
         if hasattr(self, "cap") and self.cap.isOpened():
             self.cap.release()
-        print("[YOLOTracker] Released.")
+        logger.info("[YOLOTracker] Released.")
 
     def __enter__(self):
         return self
@@ -227,26 +208,28 @@ class YOLOTracker:
         return result
 
 
-# =========================================================
-# MAIN
-# =========================================================
 def run_inference(
-    model_path: str = MODEL_PATH,
-    video_path=VIDEO_PATH,
-    output_dir: str = OUTPUT_DIR,
-    conf: float = CONF_THRESH,
-    iou: float = IOU_THRESH,
-    imgsz: int = IMGSZ,
-    save_video: bool = SAVE_VIDEO,
-    show: bool = SHOW_WINDOW,
-    skip: int = SKIP_FRAMES,
+    model_path=CFG.TRACK_MODEL_PATH,
+    video_path=CFG.TRACK_VIDEO_PATH,
+    output_dir=CFG.TRACK_OUTPUT_DIR,
+    conf: float = CFG.TRACK_CONF_THRESH,
+    iou: float = CFG.TRACK_IOU_THRESH,
+    imgsz: int = CFG.TRACK_IMGSZ,
+    save_video: bool = CFG.TRACK_SAVE_VIDEO,
+    show: bool = CFG.TRACK_SHOW_WINDOW,
+    skip: int = CFG.TRACK_SKIP_FRAMES,
 ):
-    box_annotator = sv.BoxAnnotator(
-        color=sv_color_from_bgr(BOX_COLOR)
-    )
+    model_path = Path(model_path) if not str(
+        model_path).isdigit() else model_path
+    output_dir = Path(output_dir)
+
+    if isinstance(model_path, Path) and not model_path.exists():
+        raise FileNotFoundError(f"Tracker model not found: {model_path}")
+
+    box_annotator = sv.BoxAnnotator(color=sv_color_from_bgr(CFG.BOX_COLOR))
     label_annotator = sv.LabelAnnotator(
-        color=sv_color_from_bgr(BG_COLOR),
-        text_color=sv_color_from_bgr(TEXT_COLOR),
+        color=sv_color_from_bgr(CFG.BG_COLOR),
+        text_color=sv_color_from_bgr(CFG.TEXT_COLOR),
     )
 
     with YOLOTracker(
@@ -257,17 +240,15 @@ def run_inference(
         imgsz=imgsz,
         skip=skip,
     ) as tracker:
-
         writer = None
         out_path = None
 
         if save_video:
-            out_dir = Path(output_dir)
-            out_dir.mkdir(parents=True, exist_ok=True)
+            output_dir.mkdir(parents=True, exist_ok=True)
 
             stem = Path(str(video_path)).stem if not str(
                 video_path).isdigit() else "webcam"
-            out_path = out_dir / f"{stem}_tracked.mp4"
+            out_path = output_dir / f"{stem}_tracked.mp4"
 
             writer = cv2.VideoWriter(
                 str(out_path),
@@ -280,7 +261,7 @@ def run_inference(
                 raise RuntimeError(
                     f"[run_inference] Cannot open VideoWriter: {out_path}")
 
-            print(f"[run_inference] Output : {out_path}")
+            logger.info("[run_inference] Output: %s", out_path)
 
         fps_buffer = []
         t_prev = time.perf_counter()
@@ -288,7 +269,7 @@ def run_inference(
         total_dets_all = 0
         unique_ids = set()
 
-        print("\nRunning... Press Q to quit.\n")
+        logger.info("Running... Press Q to quit.")
 
         pbar_total = tracker.total_frames if tracker.total_frames > 0 else None
         pbar = tqdm(
@@ -367,7 +348,7 @@ def run_inference(
                 if show:
                     cv2.imshow(WINDOW_NAME, annotated)
                     if cv2.waitKey(1) & 0xFF == ord("q"):
-                        print("[run_inference] Interrupted by user.")
+                        logger.info("[run_inference] Interrupted by user.")
                         break
 
         finally:
@@ -381,6 +362,18 @@ def run_inference(
 
         duration_sec = tracker.frame_idx / max(tracker.src_fps, 1e-6)
         avg_fps = sum(fps_buffer) / max(len(fps_buffer), 1)
+
+        logger.info("==================================================")
+        logger.info("✅ Готово!")
+        logger.info("Обработано кадров : %s / %s",
+                    tracker.frame_idx, tracker.total_frames)
+        logger.info("Длительность      : %s", format_time(duration_sec))
+        logger.info("Всего детекций    : %s", total_dets_all)
+        logger.info("Уникальных треков : %s", len(unique_ids))
+        logger.info("Средний FPS       : %.1f", avg_fps)
+        if out_path is not None:
+            logger.info("Сохранено в       : %s", out_path)
+        logger.info("==================================================")
 
         print("\n" + "=" * 50)
         print("  ✅ Готово!")
@@ -406,4 +399,8 @@ def run_inference(
 
 
 if __name__ == "__main__":
-    run_inference()
+    try:
+        run_inference()
+    except Exception:
+        logger.exception("Fatal error in traker.py")
+        raise

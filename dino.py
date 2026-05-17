@@ -1,200 +1,67 @@
-import os
-import cv2
 import json
 import random
 import shutil
-import torch
-import numpy as np
 from pathlib import Path
+from typing import Any, Dict, List, Tuple
+
+import cv2
+import numpy as np
+import torch
 from PIL import Image
 from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
 
-
-# =========================================================
-# CONFIG
-# =========================================================
-
-MODEL_DIR = r"grounding-dino-base"
-VIDEO_DIR = r"video_price"  # Лента #video_price
-WORK_DIR = r"work_price_tags"
-
-
-TEXT_PROMPT = "shelf price tag. price label. retail price tag. barcode label."
-
-
-BOX_THRESHOLD = 0.28
-TEXT_THRESHOLD = 0.2
-
-
-VIDEO_EXTS = (".mp4", ".mov", ".avi", ".mkv", ".mpeg", ".mpg", ".m4v")
-FRAME_STEP = 10
-
-
-MIN_BRIGHTNESS = 35
-MIN_LAPLACIAN_VAR = 60
-
-
-VAL_RATIO = 0.2
-RANDOM_SEED = 42
-
-
-CLASS_ID = 0
-CLASS_NAME = "price_tag"
-
-
-ROTATE_180_BEFORE_FLIP = False
-HORIZONTAL_FLIP = True
-
-
-SAVE_VIS = True
-SAVE_EMPTY_FRAMES = False
-
-
-# -----------------------------
-# ЖЁСТКИЕ ОГРАНИЧЕНИЯ ДЛЯ ЦЕННИКОВ
-# -----------------------------
-MIN_BOX_WIDTH_PX = 20
-MIN_BOX_HEIGHT_PX = 12
-
-
-MIN_BOX_WIDTH_NORM = 0.015
-MIN_BOX_HEIGHT_NORM = 0.012
-
-
-MAX_BOX_WIDTH_NORM = 0.28
-MAX_BOX_HEIGHT_NORM = 0.22
-
-
-# Площадь бокса как доля площади кадра
-MIN_BOX_AREA_NORM = 0.0002
-MAX_BOX_AREA_NORM = 0.06
-
-
-# Соотношение сторон бокса
-MIN_ASPECT_RATIO = 0.6    # слишком узкие вертикальные полосы отсекаем
-MAX_ASPECT_RATIO = 6.5    # слишком длинные горизонтальные рамки отсекаем
-
-
-# Если бокс почти полностью внутри другого, удаляем меньший/худший
-CONTAINMENT_THRESHOLD = 0.90
-
-
-# NMS для дублей
-NMS_IOU_THRESHOLD = 0.35
-
-
-# Доп. фильтр для «рамка слишком большая для ценника»
-MAX_EDGE_SHARE = 0.32  # ни одна сторона не должна занимать > 32% кадра
-
-
-# --- Размеры в пикселях (для кадров 720×1280) ---
-# MIN_BOX_WIDTH_PX  = 25
-# MIN_BOX_HEIGHT_PX = 15
-
-
-# --- Нормализованные минимумы (согласованы с пиксельными) ---
-# MIN_BOX_WIDTH_NORM  = 0.030   # 25 / 720  ≈ 21px min
-# MIN_BOX_HEIGHT_NORM = 0.012   # 15 / 1280 ≈ 15px min
-
-
-# --- Нормализованные максимумы ---
-# W: ценник не шире ~210px = 29% кадра
-# H: ценник не выше ~160px = 12.5% кадра (!) — ключевое изменение
-# MAX_BOX_WIDTH_NORM  = 0.30   # объединено с MAX_EDGE_SHARE_W
-# MAX_BOX_HEIGHT_NORM = 0.13    # было 0.22 → 282px, теперь 0.13 → 166px
-
-
-# --- Площадь ---
-# MIN_BOX_AREA_NORM = 0.00008   # ~74px² — поймать маленький штрихкод
-# MAX_BOX_AREA_NORM = 0.035     # ~32 000px² ≈ 200×160px — было 55 000px²
-
-
-# --- Соотношение сторон ---
-# MIN_ASPECT_RATIO = 0.45   # чуть мягче для вертикальных shelf-label
-# MAX_ASPECT_RATIO = 7.0    # немного шире для длинных горизонтальных ценников
-
-
-# --- NMS ---
-# NMS_IOU_THRESHOLD = 0.5  # без изменений
-
-
-# --- Containment ---
-# CONTAINMENT_THRESHOLD = 0.90  # без изменений
-
-
-# --- Граничный фильтр: РАЗДЕЛИТЬ на две оси ---
-# MAX_EDGE_SHARE_W = 0.30   # ни одна сторона не занимает > 30% ширины кадра
-# MAX_EDGE_SHARE_H = 0.13   # ни одна сторона не занимает > 13% высоты кадра
-# =========================================================
-# PATHS
-# =========================================================
-
-
-WORK_DIR = Path(WORK_DIR)
-YOLO_ROOT = WORK_DIR / "dataset"
-
-
-IMAGES_ALL_DIR = YOLO_ROOT / "images_all"
-LABELS_ALL_DIR = YOLO_ROOT / "labels_all"
-
-
-IMAGES_TRAIN_DIR = YOLO_ROOT / "images" / "train"
-IMAGES_VAL_DIR = YOLO_ROOT / "images" / "val"
-LABELS_TRAIN_DIR = YOLO_ROOT / "labels" / "train"
-LABELS_VAL_DIR = YOLO_ROOT / "labels" / "val"
-
-
-VIS_DIR = YOLO_ROOT / "vis"
-META_DIR = YOLO_ROOT / "meta"
-
-
-for p in [
-    WORK_DIR,
-    YOLO_ROOT,
-    IMAGES_ALL_DIR,
-    LABELS_ALL_DIR,
-    IMAGES_TRAIN_DIR,
-    IMAGES_VAL_DIR,
-    LABELS_TRAIN_DIR,
-    LABELS_VAL_DIR,
-    VIS_DIR,
-    META_DIR,
-]:
-    p.mkdir(parents=True, exist_ok=True)
-
-
-# =========================================================
-# LOAD LOCAL MODEL ONLY
-# =========================================================
-
-
-device = "cuda" if torch.cuda.is_available() else "cpu"
-print("Device:", device)
-print("Loading local model from:", MODEL_DIR)
-
-
-processor = AutoProcessor.from_pretrained(
-    MODEL_DIR,
-    local_files_only=True
-)
-
-
-model = AutoModelForZeroShotObjectDetection.from_pretrained(
-    MODEL_DIR,
-    local_files_only=True
-).to(device)
-
-
-model.eval()
-print("Local Grounding DINO loaded successfully.")
-
-
-# =========================================================
-# HELPERS
-# =========================================================
-
-
-def is_good_frame(frame_bgr, min_brightness=35, min_laplacian_var=60):
+from config import CFG
+from logging_setup import setup_logging
+
+
+logger = setup_logging("dino")
+
+
+def ensure_dirs() -> None:
+    for p in [
+        CFG.WORK_DIR,
+        CFG.YOLO_ROOT,
+        CFG.IMAGES_ALL_DIR,
+        CFG.LABELS_ALL_DIR,
+        CFG.IMAGES_TRAIN_DIR,
+        CFG.IMAGES_VAL_DIR,
+        CFG.LABELS_TRAIN_DIR,
+        CFG.LABELS_VAL_DIR,
+        CFG.VIS_DIR,
+        CFG.META_DIR,
+        CFG.LOGS_DIR,
+    ]:
+        p.mkdir(parents=True, exist_ok=True)
+
+
+def load_local_model():
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    logger.info("Device: %s", device)
+    logger.info("Loading local model from: %s", CFG.GROUNDING_DINO_DIR)
+
+    try:
+        processor = AutoProcessor.from_pretrained(
+            str(CFG.GROUNDING_DINO_DIR),
+            local_files_only=True
+        )
+        model = AutoModelForZeroShotObjectDetection.from_pretrained(
+            str(CFG.GROUNDING_DINO_DIR),
+            local_files_only=True
+        ).to(device)
+        model.eval()
+    except Exception:
+        logger.exception("Failed to load local Grounding DINO model")
+        raise
+
+    logger.info("Local Grounding DINO loaded successfully")
+    return processor, model, device
+
+
+def is_good_frame(
+    frame_bgr: np.ndarray,
+    min_brightness: float,
+    min_laplacian_var: float
+) -> Tuple[bool, float, float]:
     gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
     brightness = float(gray.mean())
     sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
@@ -202,18 +69,23 @@ def is_good_frame(frame_bgr, min_brightness=35, min_laplacian_var=60):
     return is_good, brightness, sharpness
 
 
-def preprocess_frame(frame_bgr):
-    if ROTATE_180_BEFORE_FLIP:
+def preprocess_frame(frame_bgr: np.ndarray) -> np.ndarray:
+    if CFG.ROTATE_180_BEFORE_FLIP:
         frame_bgr = cv2.rotate(frame_bgr, cv2.ROTATE_180)
-    if HORIZONTAL_FLIP:
+    if CFG.HORIZONTAL_FLIP:
         frame_bgr = cv2.flip(frame_bgr, 1)
     return frame_bgr
 
 
-def detect_price_tags(pil_image):
+def detect_price_tags(
+    pil_image: Image.Image,
+    processor,
+    model,
+    device: str
+) -> Dict[str, Any]:
     inputs = processor(
         images=pil_image,
-        text=TEXT_PROMPT,
+        text=CFG.TEXT_PROMPT,
         return_tensors="pt"
     ).to(device)
 
@@ -223,15 +95,15 @@ def detect_price_tags(pil_image):
     results = processor.post_process_grounded_object_detection(
         outputs,
         inputs.input_ids,
-        threshold=BOX_THRESHOLD,
-        text_threshold=TEXT_THRESHOLD,
+        threshold=CFG.BOX_THRESHOLD,
+        text_threshold=CFG.TEXT_THRESHOLD,
         target_sizes=[(pil_image.height, pil_image.width)]
     )[0]
 
     return results
 
 
-def xyxy_to_yolo(box, img_w, img_h):
+def xyxy_to_yolo(box: List[float], img_w: int, img_h: int) -> Tuple[float, float, float, float]:
     x1, y1, x2, y2 = box
     xc = ((x1 + x2) / 2.0) / img_w
     yc = ((y1 + y2) / 2.0) / img_h
@@ -240,7 +112,7 @@ def xyxy_to_yolo(box, img_w, img_h):
     return xc, yc, bw, bh
 
 
-def clip_box(box, img_w, img_h):
+def clip_box(box: List[float], img_w: int, img_h: int) -> List[float]:
     x1, y1, x2, y2 = box
     x1 = max(0.0, min(float(x1), img_w - 1))
     y1 = max(0.0, min(float(y1), img_h - 1))
@@ -249,29 +121,12 @@ def clip_box(box, img_w, img_h):
     return [x1, y1, x2, y2]
 
 
-def box_area(box):
+def box_area(box: List[float]) -> float:
     x1, y1, x2, y2 = box
     return max(0.0, x2 - x1) * max(0.0, y2 - y1)
 
 
-def box_iou(box_a, box_b):
-    ax1, ay1, ax2, ay2 = box_a
-    bx1, by1, bx2, by2 = box_b
-
-    ix1 = max(ax1, bx1)
-    iy1 = max(ay1, by1)
-    ix2 = min(ax2, bx2)
-    iy2 = min(ay2, by2)
-
-    iw = max(0.0, ix2 - ix1)
-    ih = max(0.0, iy2 - iy1)
-    inter = iw * ih
-
-    union = box_area(box_a) + box_area(box_b) - inter
-    return inter / union if union > 0 else 0.0
-
-
-def containment_ratio(inner, outer):
+def containment_ratio(inner: List[float], outer: List[float]) -> float:
     ix1 = max(inner[0], outer[0])
     iy1 = max(inner[1], outer[1])
     ix2 = min(inner[2], outer[2])
@@ -279,11 +134,11 @@ def containment_ratio(inner, outer):
     iw = max(0.0, ix2 - ix1)
     ih = max(0.0, iy2 - iy1)
     inter = iw * ih
-    a = box_area(inner)
-    return inter / a if a > 0 else 0.0
+    area_inner = box_area(inner)
+    return inter / area_inner if area_inner > 0 else 0.0
 
 
-def valid_box(box, img_w, img_h):
+def valid_box(box: List[float], img_w: int, img_h: int) -> Tuple[bool, str]:
     x1, y1, x2, y2 = clip_box(box, img_w, img_h)
     w = x2 - x1
     h = y2 - y1
@@ -291,7 +146,7 @@ def valid_box(box, img_w, img_h):
     if w <= 0 or h <= 0:
         return False, "non_positive"
 
-    if w < MIN_BOX_WIDTH_PX or h < MIN_BOX_HEIGHT_PX:
+    if w < CFG.MIN_BOX_WIDTH_PX or h < CFG.MIN_BOX_HEIGHT_PX:
         return False, "too_small_px"
 
     wn = w / img_w
@@ -299,32 +154,29 @@ def valid_box(box, img_w, img_h):
     area_n = (w * h) / (img_w * img_h)
     aspect = w / h
 
-    if wn < MIN_BOX_WIDTH_NORM or hn < MIN_BOX_HEIGHT_NORM:
+    if wn < CFG.MIN_BOX_WIDTH_NORM or hn < CFG.MIN_BOX_HEIGHT_NORM:
         return False, "too_small_norm"
 
-    if wn > MAX_BOX_WIDTH_NORM or hn > MAX_BOX_HEIGHT_NORM:
+    if wn > CFG.MAX_BOX_WIDTH_NORM or hn > CFG.MAX_BOX_HEIGHT_NORM:
         return False, "too_large_norm"
 
-    if area_n < MIN_BOX_AREA_NORM:
+    if area_n < CFG.MIN_BOX_AREA_NORM:
         return False, "too_small_area"
 
-    if area_n > MAX_BOX_AREA_NORM:
+    if area_n > CFG.MAX_BOX_AREA_NORM:
         return False, "too_large_area"
 
-    if aspect < MIN_ASPECT_RATIO or aspect > MAX_ASPECT_RATIO:
+    if aspect < CFG.MIN_ASPECT_RATIO or aspect > CFG.MAX_ASPECT_RATIO:
         return False, "bad_aspect"
 
-    if max(wn, hn) > MAX_EDGE_SHARE:
+    if max(wn, hn) > CFG.MAX_EDGE_SHARE:
         return False, "too_large_edge"
-
-    # if wn > MAX_EDGE_SHARE_W or hn > MAX_EDGE_SHARE_H:
-        # return False, "too_large_edge"
 
     return True, "ok"
 
 
-def nms_boxes(boxes, scores, iou_threshold=0.35):
-    if len(boxes) == 0:
+def nms_boxes(boxes: List[List[float]], scores: List[float], iou_threshold: float) -> List[int]:
+    if not boxes:
         return []
 
     boxes_arr = np.array(boxes, dtype=np.float32)
@@ -361,7 +213,12 @@ def nms_boxes(boxes, scores, iou_threshold=0.35):
     return keep
 
 
-def remove_contained_boxes(boxes, scores, labels, containment_threshold=0.90):
+def remove_contained_boxes(
+    boxes: List[List[float]],
+    scores: List[float],
+    labels: List[str],
+    containment_threshold: float
+) -> Tuple[List[List[float]], List[float], List[str], int]:
     if len(boxes) <= 1:
         return boxes, scores, labels, 0
 
@@ -378,14 +235,12 @@ def remove_contained_boxes(boxes, scores, labels, containment_threshold=0.90):
             ci = containment_ratio(boxes[i], boxes[j])
             cj = containment_ratio(boxes[j], boxes[i])
 
-            # Если box i почти внутри j, оставляем лучший по score
             if ci >= containment_threshold:
                 if scores[i] <= scores[j]:
                     keep[i] = False
                     removed += 1
                     break
 
-            # Если j почти внутри i и j хуже, удаляем j
             if cj >= containment_threshold and scores[j] < scores[i]:
                 keep[j] = False
                 removed += 1
@@ -393,11 +248,16 @@ def remove_contained_boxes(boxes, scores, labels, containment_threshold=0.90):
     new_boxes = [b for b, k in zip(boxes, keep) if k]
     new_scores = [s for s, k in zip(scores, keep) if k]
     new_labels = [l for l, k in zip(labels, keep) if k]
-
     return new_boxes, new_scores, new_labels, removed
 
 
-def save_visualization(frame_bgr, boxes, scores, labels, out_path):
+def save_visualization(
+    frame_bgr: np.ndarray,
+    boxes: List[List[float]],
+    scores: List[float],
+    labels: List[str],
+    out_path: Path
+) -> None:
     vis = frame_bgr.copy()
 
     for box, score, label in zip(boxes, scores, labels):
@@ -415,311 +275,362 @@ def save_visualization(frame_bgr, boxes, scores, labels, out_path):
             2
         )
 
-    cv2.imwrite(str(out_path), vis)
+    ok = cv2.imwrite(str(out_path), vis)
+    if not ok:
+        raise IOError(f"Failed to save visualization: {out_path}")
 
 
-# =========================================================
-# FIND VIDEOS
-# =========================================================
+def find_videos() -> List[Path]:
+    if not CFG.VIDEO_DIR.exists():
+        raise FileNotFoundError(
+            f"Video directory does not exist: {CFG.VIDEO_DIR}")
 
-video_files = [
-    f for f in sorted(os.listdir(VIDEO_DIR))
-    if f.lower().endswith(VIDEO_EXTS)
-]
+    video_files = [
+        p for p in sorted(CFG.VIDEO_DIR.iterdir())
+        if p.is_file() and p.suffix.lower() in CFG.VIDEO_EXTS
+    ]
 
+    logger.info("Found videos: %d", len(video_files))
+    for vf in video_files:
+        logger.info(" - %s", vf.name)
 
-print(f"Found videos: {len(video_files)}")
-for vf in video_files:
-    print(" -", vf)
+    if not video_files:
+        raise FileNotFoundError(f"No video files found in: {CFG.VIDEO_DIR}")
 
-
-if len(video_files) == 0:
-    raise FileNotFoundError(f"No video files found in: {VIDEO_DIR}")
-
-
-# =========================================================
-# PROCESS VIDEOS
-# =========================================================
+    return video_files
 
 
-stats = {
-    "videos_total": len(video_files),
-    "frames_seen": 0,
-    "frames_sampled": 0,
-    "frames_good": 0,
-    "frames_labeled": 0,
-    "frames_empty_saved": 0,
-    "frames_skipped_quality": 0,
-    "frames_skipped_no_boxes": 0,
-    "boxes_filtered_invalid": 0,
-    "boxes_filtered_nms": 0,
-    "boxes_filtered_contained": 0,
-    "reject_reasons": {},
-    "video_stats": {}
-}
+def init_stats(videos_total: int) -> Dict[str, Any]:
+    return {
+        "videos_total": videos_total,
+        "frames_seen": 0,
+        "frames_sampled": 0,
+        "frames_good": 0,
+        "frames_labeled": 0,
+        "frames_empty_saved": 0,
+        "frames_skipped_quality": 0,
+        "frames_skipped_no_boxes": 0,
+        "boxes_filtered_invalid": 0,
+        "boxes_filtered_nms": 0,
+        "boxes_filtered_contained": 0,
+        "reject_reasons": {},
+        "video_stats": {},
+        "box_scores": [],
+        "box_widths": [],
+        "box_heights": [],
+        "box_areas": [],
+        "boxes_per_frame": [],
+    }
 
 
-for video_name in video_files:
-    video_path = os.path.join(VIDEO_DIR, video_name)
-    cap = cv2.VideoCapture(video_path)
-
+def process_video(video_path: Path, processor, model, device: str, stats: Dict[str, Any]) -> None:
+    cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
-        print(f"[WARN] Cannot open video: {video_name}")
-        continue
+        logger.warning("Cannot open video: %s", video_path.name)
+        return
 
     frame_idx = 0
     saved_from_video = 0
     skipped_quality = 0
     skipped_no_boxes = 0
+    video_stem = video_path.stem
 
-    video_stem = Path(video_name).stem
-    print(f"\\nProcessing: {video_name}")
+    logger.info("Processing: %s", video_path.name)
 
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
 
-        stats["frames_seen"] += 1
+            stats["frames_seen"] += 1
 
-        if frame_idx % FRAME_STEP != 0:
-            frame_idx += 1
-            continue
-
-        stats["frames_sampled"] += 1
-        frame = preprocess_frame(frame)
-
-        good, brightness, sharpness = is_good_frame(
-            frame,
-            min_brightness=MIN_BRIGHTNESS,
-            min_laplacian_var=MIN_LAPLACIAN_VAR
-        )
-
-        if not good:
-            stats["frames_skipped_quality"] += 1
-            skipped_quality += 1
-            frame_idx += 1
-            continue
-
-        stats["frames_good"] += 1
-
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        pil_image = Image.fromarray(rgb)
-
-        try:
-            results = detect_price_tags(pil_image)
-        except Exception as e:
-            print(
-                f"[WARN] Detection failed on {video_name}, frame {frame_idx}: {e}")
-            frame_idx += 1
-            continue
-
-        img_h, img_w = frame.shape[:2]
-
-        candidate_boxes = []
-        candidate_scores = []
-        candidate_labels = []
-
-        for box, score, label in zip(results["boxes"], results["scores"], results["labels"]):
-            box = [float(v) for v in box.tolist()]
-            ok, reason = valid_box(box, img_w, img_h)
-
-            if not ok:
-                stats["boxes_filtered_invalid"] += 1
-                stats["reject_reasons"][reason] = stats["reject_reasons"].get(
-                    reason, 0) + 1
+            if frame_idx % CFG.FRAME_STEP != 0:
+                frame_idx += 1
                 continue
 
-            candidate_boxes.append(clip_box(box, img_w, img_h))
-            candidate_scores.append(float(score))
-            candidate_labels.append(str(label))
+            stats["frames_sampled"] += 1
+            frame = preprocess_frame(frame)
 
-        if len(candidate_boxes) == 0:
-            stats["frames_skipped_no_boxes"] += 1
-            skipped_no_boxes += 1
+            good, brightness, sharpness = is_good_frame(
+                frame,
+                min_brightness=CFG.MIN_BRIGHTNESS,
+                min_laplacian_var=CFG.MIN_LAPLACIAN_VAR
+            )
+
+            if not good:
+                stats["frames_skipped_quality"] += 1
+                skipped_quality += 1
+                frame_idx += 1
+                continue
+
+            stats["frames_good"] += 1
+
+            try:
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                pil_image = Image.fromarray(rgb)
+                results = detect_price_tags(
+                    pil_image, processor, model, device)
+            except Exception:
+                logger.exception(
+                    "Detection failed on %s, frame %d", video_path.name, frame_idx)
+                frame_idx += 1
+                continue
+
+            img_h, img_w = frame.shape[:2]
+
+            candidate_boxes: List[List[float]] = []
+            candidate_scores: List[float] = []
+            candidate_labels: List[str] = []
+
+            try:
+                for box, score, label in zip(results["boxes"], results["scores"], results["labels"]):
+                    box = [float(v) for v in box.tolist()]
+                    ok, reason = valid_box(box, img_w, img_h)
+
+                    if not ok:
+                        stats["boxes_filtered_invalid"] += 1
+                        stats["reject_reasons"][reason] = stats["reject_reasons"].get(
+                            reason, 0) + 1
+                        continue
+
+                    candidate_boxes.append(clip_box(box, img_w, img_h))
+                    candidate_scores.append(float(score))
+                    candidate_labels.append(str(label))
+            except Exception:
+                logger.exception(
+                    "Postprocess failed on %s, frame %d", video_path.name, frame_idx)
+                frame_idx += 1
+                continue
+
+            if len(candidate_boxes) == 0:
+                stats["frames_skipped_no_boxes"] += 1
+                skipped_no_boxes += 1
+                frame_idx += 1
+                continue
+
+            keep_idx = nms_boxes(
+                candidate_boxes, candidate_scores, CFG.NMS_IOU_THRESHOLD)
+            stats["boxes_filtered_nms"] += len(candidate_boxes) - len(keep_idx)
+
+            nms_boxes_kept = [candidate_boxes[i] for i in keep_idx]
+            nms_scores_kept = [candidate_scores[i] for i in keep_idx]
+            nms_labels_kept = [candidate_labels[i] for i in keep_idx]
+
+            final_boxes, final_scores, final_labels, removed_contained = remove_contained_boxes(
+                nms_boxes_kept,
+                nms_scores_kept,
+                nms_labels_kept,
+                containment_threshold=CFG.CONTAINMENT_THRESHOLD
+            )
+            stats["boxes_filtered_contained"] += removed_contained
+
+            if len(final_boxes) == 0:
+                stats["frames_skipped_no_boxes"] += 1
+                skipped_no_boxes += 1
+                frame_idx += 1
+                continue
+
+            yolo_lines = []
+            for box in final_boxes:
+                xc, yc, bw, bh = xyxy_to_yolo(box, img_w, img_h)
+                yolo_lines.append(
+                    f"{CFG.CLASS_ID} {xc:.6f} {yc:.6f} {bw:.6f} {bh:.6f}")
+
+            out_stem = f"{video_stem}_frame_{frame_idx:06d}"
+            img_out_path = CFG.IMAGES_ALL_DIR / f"{out_stem}.jpg"
+            txt_out_path = CFG.LABELS_ALL_DIR / f"{out_stem}.txt"
+            vis_out_path = CFG.VIS_DIR / f"{out_stem}_vis.jpg"
+            meta_out_path = CFG.META_DIR / f"{out_stem}.json"
+
+            meta = {
+                "source_video": video_path.name,
+                "frame_idx": frame_idx,
+                "brightness": brightness,
+                "sharpness": sharpness,
+                "prompt": CFG.TEXT_PROMPT,
+                "box_threshold": CFG.BOX_THRESHOLD,
+                "text_threshold": CFG.TEXT_THRESHOLD,
+                "raw_detections": len(results["boxes"]),
+                "after_size_shape_filter": len(candidate_boxes),
+                "after_nms": len(nms_boxes_kept),
+                "after_containment_filter": len(final_boxes),
+                "detections": [
+                    {
+                        "label": label,
+                        "score": score,
+                        "bbox_xyxy": box
+                    }
+                    for box, score, label in zip(final_boxes, final_scores, final_labels)
+                ]
+            }
+
+            try:
+                ok = cv2.imwrite(str(img_out_path), frame)
+                if not ok:
+                    raise IOError(f"Failed to save image: {img_out_path}")
+
+                txt_out_path.write_text(
+                    "\n".join(yolo_lines) + "\n", encoding="utf-8")
+                meta_out_path.write_text(
+                    json.dumps(meta, ensure_ascii=False, indent=2),
+                    encoding="utf-8"
+                )
+
+                if CFG.SAVE_VIS:
+                    save_visualization(
+                        frame, final_boxes, final_scores, final_labels, vis_out_path)
+            except Exception:
+                logger.exception(
+                    "Failed saving outputs on %s, frame %d", video_path.name, frame_idx)
+                frame_idx += 1
+                continue
+
+            for box, score in zip(final_boxes, final_scores):
+                xc, yc, bw, bh = xyxy_to_yolo(box, img_w, img_h)
+                stats["box_scores"].append(float(score))
+                stats["box_widths"].append(float(bw))
+                stats["box_heights"].append(float(bh))
+                stats["box_areas"].append(float(bw * bh))
+                stats["boxes_per_frame"].append(len(final_boxes))
+
+            stats["frames_labeled"] += 1
+            saved_from_video += 1
             frame_idx += 1
-            continue
 
-        # Шаг 1: NMS
-        keep_idx = nms_boxes(
-            candidate_boxes, candidate_scores, NMS_IOU_THRESHOLD)
-        stats["boxes_filtered_nms"] += len(candidate_boxes) - len(keep_idx)
+    finally:
+        cap.release()
 
-        nms_boxes_kept = [candidate_boxes[i] for i in keep_idx]
-        nms_scores_kept = [candidate_scores[i] for i in keep_idx]
-        nms_labels_kept = [candidate_labels[i] for i in keep_idx]
-
-        # Шаг 2: удаление почти вложенных боксов
-        final_boxes, final_scores, final_labels, removed_contained = remove_contained_boxes(
-            nms_boxes_kept,
-            nms_scores_kept,
-            nms_labels_kept,
-            containment_threshold=CONTAINMENT_THRESHOLD
-        )
-        stats["boxes_filtered_contained"] += removed_contained
-
-        if len(final_boxes) == 0:
-            stats["frames_skipped_no_boxes"] += 1
-            skipped_no_boxes += 1
-            frame_idx += 1
-            continue
-
-        yolo_lines = []
-        for box in final_boxes:
-            xc, yc, bw, bh = xyxy_to_yolo(box, img_w, img_h)
-            yolo_lines.append(
-                f"{CLASS_ID} {xc:.6f} {yc:.6f} {bw:.6f} {bh:.6f}")
-
-        out_stem = f"{video_stem}_frame_{frame_idx:06d}"
-        img_out_path = IMAGES_ALL_DIR / f"{out_stem}.jpg"
-        txt_out_path = LABELS_ALL_DIR / f"{out_stem}.txt"
-        vis_out_path = VIS_DIR / f"{out_stem}_vis.jpg"
-        meta_out_path = META_DIR / f"{out_stem}.json"
-
-        cv2.imwrite(str(img_out_path), frame)
-        txt_out_path.write_text("\n".join(yolo_lines) + "\n", encoding="utf-8")
-
-        meta = {
-            "source_video": video_name,
-            "frame_idx": frame_idx,
-            "brightness": brightness,
-            "sharpness": sharpness,
-            "prompt": TEXT_PROMPT,
-            "box_threshold": BOX_THRESHOLD,
-            "text_threshold": TEXT_THRESHOLD,
-            "raw_detections": len(results["boxes"]),
-            "after_size_shape_filter": len(candidate_boxes),
-            "after_nms": len(nms_boxes_kept),
-            "after_containment_filter": len(final_boxes),
-            "detections": [
-                {
-                    "label": label,
-                    "score": score,
-                    "bbox_xyxy": box
-                }
-                for box, score, label in zip(final_boxes, final_scores, final_labels)
-            ]
-        }
-        meta_out_path.write_text(json.dumps(
-            meta, ensure_ascii=False, indent=2), encoding="utf-8")
-
-        if SAVE_VIS:
-            save_visualization(frame, final_boxes,
-                               final_scores, final_labels, vis_out_path)
-
-        for box, score in zip(final_boxes, final_scores):
-            xc, yc, bw, bh = xyxy_to_yolo(box, img_w, img_h)
-            stats.setdefault("box_scores", []).append(float(score))
-            stats.setdefault("box_widths", []).append(float(bw))
-            stats.setdefault("box_heights", []).append(float(bh))
-            stats.setdefault("box_areas", []).append(float(bw * bh))
-            stats.setdefault("boxes_per_frame", []).append(len(final_boxes))
-
-        stats["frames_labeled"] += 1
-        saved_from_video += 1
-        frame_idx += 1
-
-    cap.release()
-
-    stats["video_stats"][video_name] = {
+    stats["video_stats"][video_path.name] = {
         "saved_labeled_frames": saved_from_video,
         "skipped_quality": skipped_quality,
         "skipped_no_boxes": skipped_no_boxes
     }
 
-    print(f"Saved labeled frames from {video_name}: {saved_from_video}")
+    logger.info("Saved labeled frames from %s: %d",
+                video_path.name, saved_from_video)
 
 
-# =========================================================
-# TRAIN / VAL SPLIT
-# =========================================================
+def copy_split(image_paths: List[Path], split: str) -> int:
+    copied = 0
 
-
-all_images = [
-    p for p in IMAGES_ALL_DIR.glob("*")
-    if p.suffix.lower() in [".jpg", ".jpeg", ".png", ".webp"]
-]
-
-
-random.seed(RANDOM_SEED)
-random.shuffle(all_images)
-
-
-if len(all_images) == 0:
-    raise RuntimeError(
-        "No labeled images were produced. Check thresholds/prompt/video orientation.")
-
-
-val_count = max(1, int(len(all_images) * VAL_RATIO)
-                ) if len(all_images) > 1 else 0
-val_set = set(all_images[:val_count])
-train_set = set(all_images[val_count:])
-
-
-def copy_split(image_paths, split):
     for img_path in image_paths:
         stem = img_path.stem
-        label_path = LABELS_ALL_DIR / f"{stem}.txt"
+        label_path = CFG.LABELS_ALL_DIR / f"{stem}.txt"
 
         if not label_path.exists():
+            logger.warning("Missing label for image: %s", img_path.name)
             continue
 
         if split == "train":
-            img_dst = IMAGES_TRAIN_DIR / img_path.name
-            lbl_dst = LABELS_TRAIN_DIR / label_path.name
+            img_dst = CFG.IMAGES_TRAIN_DIR / img_path.name
+            lbl_dst = CFG.LABELS_TRAIN_DIR / label_path.name
         else:
-            img_dst = IMAGES_VAL_DIR / img_path.name
-            lbl_dst = LABELS_VAL_DIR / label_path.name
+            img_dst = CFG.IMAGES_VAL_DIR / img_path.name
+            lbl_dst = CFG.LABELS_VAL_DIR / label_path.name
 
-        shutil.copy2(img_path, img_dst)
-        shutil.copy2(label_path, lbl_dst)
+        try:
+            shutil.copy2(img_path, img_dst)
+            shutil.copy2(label_path, lbl_dst)
+            copied += 1
+        except Exception:
+            logger.exception("Failed to copy %s into %s split",
+                             img_path.name, split)
 
-
-copy_split(train_set, "train")
-copy_split(val_set, "val")
-
-
-# =========================================================
-# WRITE YOLO YAML
-# =========================================================
+    return copied
 
 
-yaml_path = YOLO_ROOT / "data.yaml"
-yaml_text = f"""
-path: {YOLO_ROOT.resolve()}
+def write_yaml() -> Path:
+    yaml_path = CFG.YOLO_ROOT / "data.yaml"
+    yaml_text = f"""
+path: {CFG.YOLO_ROOT.resolve()}
 train: images/train
 val: images/val
 
-
 nc: 1
 names:
-  0: {CLASS_NAME}
+  0: {CFG.CLASS_NAME}
 """.strip()
 
-
-yaml_path.write_text(yaml_text, encoding="utf-8")
-
-
-# =========================================================
-# SAVE GLOBAL STATS
-# =========================================================
+    yaml_path.write_text(yaml_text, encoding="utf-8")
+    return yaml_path
 
 
-stats_path = YOLO_ROOT / "pipeline_stats.json"
-stats_path.write_text(json.dumps(
-    stats, ensure_ascii=False, indent=2), encoding="utf-8")
+def save_stats(stats: Dict[str, Any]) -> Path:
+    stats_path = CFG.YOLO_ROOT / "pipeline_stats.json"
+    stats_path.write_text(
+        json.dumps(stats, ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
+    return stats_path
 
 
-# =========================================================
-# FINAL REPORT
-# =========================================================
+def main() -> None:
+    ensure_dirs()
+
+    processor, model, device = load_local_model()
+    video_files = find_videos()
+    stats = init_stats(len(video_files))
+
+    for video_path in video_files:
+        try:
+            process_video(video_path, processor, model, device, stats)
+        except Exception:
+            logger.exception(
+                "Unhandled error while processing %s", video_path.name)
+
+    all_images = [
+        p for p in CFG.IMAGES_ALL_DIR.glob("*")
+        if p.suffix.lower() in CFG.IMAGE_EXTS
+    ]
+
+    random.seed(CFG.RANDOM_SEED)
+    random.shuffle(all_images)
+
+    if len(all_images) == 0:
+        raise RuntimeError(
+            "No labeled images were produced. Check thresholds/prompt/video orientation."
+        )
+
+    val_count = max(1, int(len(all_images) * CFG.VAL_RATIO)
+                    ) if len(all_images) > 1 else 0
+    val_set = set(all_images[:val_count])
+    train_set = set(all_images[val_count:])
+
+    train_copied = copy_split(list(train_set), "train")
+    val_copied = copy_split(list(val_set), "val")
+
+    yaml_path = write_yaml()
+    stats_path = save_stats(stats)
+
+    logger.info("=== DONE ===")
+    logger.info("Stats saved to: %s", stats_path.resolve())
+    logger.info("YOLO dataset: %s", CFG.YOLO_ROOT.resolve())
+    logger.info("data.yaml: %s", yaml_path.resolve())
+    logger.info("train images copied: %d", train_copied)
+    logger.info("val images copied: %d", val_copied)
+    logger.info("train images total: %d", len(
+        list(CFG.IMAGES_TRAIN_DIR.glob("*"))))
+    logger.info("val images total: %d", len(
+        list(CFG.IMAGES_VAL_DIR.glob("*"))))
+    logger.info("train labels total: %d", len(
+        list(CFG.LABELS_TRAIN_DIR.glob("*.txt"))))
+    logger.info("val labels total: %d", len(
+        list(CFG.LABELS_VAL_DIR.glob("*.txt"))))
+
+    print("\n=== DONE ===")
+    print(json.dumps(stats, ensure_ascii=False, indent=2))
+    print("YOLO dataset:", str(CFG.YOLO_ROOT.resolve()))
+    print("data.yaml:", str(yaml_path.resolve()))
+    print("train images:", len(list(CFG.IMAGES_TRAIN_DIR.glob("*"))))
+    print("val images:", len(list(CFG.IMAGES_VAL_DIR.glob("*"))))
+    print("train labels:", len(list(CFG.LABELS_TRAIN_DIR.glob("*.txt"))))
+    print("val labels:", len(list(CFG.LABELS_VAL_DIR.glob("*.txt"))))
 
 
-print("\\n=== DONE ===")
-print(json.dumps(stats, ensure_ascii=False, indent=2))
-print("YOLO dataset:", str(YOLO_ROOT.resolve()))
-print("data.yaml:", str(yaml_path.resolve()))
-print("train images:", len(list(IMAGES_TRAIN_DIR.glob("*"))))
-print("val images:", len(list(IMAGES_VAL_DIR.glob("*"))))
-print("train labels:", len(list(LABELS_TRAIN_DIR.glob("*.txt"))))
-print("val labels:", len(list(LABELS_VAL_DIR.glob("*.txt"))))
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception:
+        logger.exception("Fatal error in dino.py")
+        raise
